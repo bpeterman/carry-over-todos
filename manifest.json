@@ -1,0 +1,9 @@
+{
+  "id": "carry-over-todos",
+  "name": "Carry Over Todos",
+  "version": "1.0.0",
+  "minAppVersion": "1.0.0",
+  "description": "Copy uncompleted todo items from the most recent previous daily note to today's daily note.",
+  "author": "Blake Peterman",
+  "isDesktopOnly": false
+}
