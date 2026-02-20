@@ -32,6 +32,9 @@ The plugin expects daily notes with a TODO section using standard markdown check
 
 ### Notes
 
+...
+```
+
 The TODO section is identified by a `## TODO` or `### TODO` heading and ends at the next heading.
 
 ## Installation
