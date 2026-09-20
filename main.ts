@@ -1,8 +1,15 @@
 import { Plugin, TFile, Notice, moment } from "obsidian";
+import { selectCarryOverSources } from "./source-selection";
 
 interface DailyNotesConfig {
   folder: string;
   format: string;
+}
+
+interface DailyNoteCandidate {
+  file: TFile;
+  date: moment.Moment;
+  day: number;
 }
 
 const MAX_LOOKBACK_DAYS = 30;
@@ -30,19 +37,41 @@ export default class CarryOverTodosPlugin extends Plugin {
     return `${config.folder}/${date.format(config.format)}.md`;
   }
 
-  private async findPreviousNote(): Promise<{ file: TFile; date: moment.Moment } | null> {
+  private findPreviousNotes(): DailyNoteCandidate[] {
     const config = this.getDailyNotesConfig();
     const today = moment();
+    const candidates: DailyNoteCandidate[] = [];
 
     for (let i = 1; i <= MAX_LOOKBACK_DAYS; i++) {
       const date = today.clone().subtract(i, "days");
       const path = this.buildNotePath(date, config);
       const file = this.app.vault.getAbstractFileByPath(path);
       if (file instanceof TFile) {
-        return { file, date };
+        candidates.push({ file, date, day: date.day() });
       }
     }
-    return null;
+
+    return selectCarryOverSources(today.day(), candidates);
+  }
+
+  private mergeUniqueTodos(todoLists: string[][]): string[] {
+    const seenTopLevel = new Set<string>();
+    const result: string[] = [];
+
+    for (const todos of todoLists) {
+      let includeCurrentTask = true;
+
+      for (const todo of todos) {
+        if (/^- \[ \]/.test(todo)) {
+          includeCurrentTask = !seenTopLevel.has(todo);
+          seenTopLevel.add(todo);
+        }
+
+        if (includeCurrentTask) result.push(todo);
+      }
+    }
+
+    return result;
   }
 
   private extractUncompletedTodos(content: string): string[] {
@@ -214,17 +243,22 @@ export default class CarryOverTodosPlugin extends Plugin {
       return;
     }
 
-    const previous = await this.findPreviousNote();
-    if (!previous) {
+    const sources = this.findPreviousNotes();
+    if (sources.length === 0) {
       new Notice("No recent daily note found in the last 30 days.");
       return;
     }
 
-    const { file: prevFile, date: prevDate } = previous;
-    const dateLabel = this.formatDateNotice(prevDate);
-
-    const prevContent = await this.app.vault.read(prevFile);
-    const todos = this.extractUncompletedTodos(prevContent);
+    const todoLists = await Promise.all(
+      sources.map(async ({ file }) => {
+        const content = await this.app.vault.read(file);
+        return this.extractUncompletedTodos(content);
+      }),
+    );
+    const todos = this.mergeUniqueTodos(todoLists);
+    const dateLabel = sources
+      .map(({ date }) => this.formatDateNotice(date))
+      .join(" and ");
 
     if (todos.length === 0) {
       new Notice(`No uncompleted todos to carry over from ${dateLabel}.`);
@@ -235,7 +269,7 @@ export default class CarryOverTodosPlugin extends Plugin {
 
     const inserted = await this.insertTodosIntoNote(todayFile, todos);
     if (inserted) {
-      await this.removeUncompletedTodos(prevFile);
+      await Promise.all(sources.map(({ file }) => this.removeUncompletedTodos(file)));
     }
   }
 }

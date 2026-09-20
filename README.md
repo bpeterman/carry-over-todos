@@ -5,6 +5,7 @@ An Obsidian plugin that copies uncompleted todo items from the most recent previ
 ## Features
 
 - **Smart lookback**: Finds the most recent previous daily note, walking back up to 30 days (handles weekends, vacations, or any gaps)
+- **Monday-safe carry over**: On weekdays, if the newest note is a weekend note, also carries unfinished todos from the most recent weekday note (for example, Sunday and Friday on Monday)
 - **Preserves nesting**: Carries over nested/indented sub-tasks along with their parent
 - **Cleans up source**: Removes carried-over items from the previous note, leaving completed todos intact
 - **Template-aware**: Replaces the placeholder todo if present, otherwise appends to existing items
