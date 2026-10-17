@@ -1,13 +1,17 @@
 import esbuild from "esbuild";
-
-const result = await esbuild.build({
-  entryPoints: ["source-selection.test.ts"],
-  bundle: true,
-  write: false,
-  platform: "node",
-  format: "esm",
-  target: "node16",
-});
-
-const source = result.outputFiles[0].text;
-await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+const dir = await mkdtemp(join(tmpdir(), "carry-over-tests-"));
+try {
+  for (const entry of ["source-selection.test.ts", "task-blocks.test.ts", "editor-sorting.test.ts", "plugin.test.ts"]) {
+    const outfile = join(dir, entry.replace(".ts", ".mjs"));
+    await esbuild.build({ entryPoints: [entry], bundle: true, outfile, platform: "node", format: "esm", target: "node16", plugins: [{ name: "mock-obsidian", setup(build) {
+      build.onResolve({ filter: /^obsidian$/ }, () => ({ path: join(process.cwd(), "obsidian-test-stub.ts") }));
+    } }] });
+    await import(pathToFileURL(outfile).href);
+  }
+} finally {
+  await rm(dir, { recursive: true, force: true });
+}

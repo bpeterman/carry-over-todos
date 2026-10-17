@@ -1,5 +1,7 @@
-import { Plugin, TFile, Notice, moment } from "obsidian";
+import { Plugin, TFile, Notice, moment, editorInfoField, MarkdownRenderChild } from "obsidian";
 import { selectCarryOverSources } from "./source-selection";
+import { taskSortingExtension } from "./editor-sorting";
+import { openTaskBlocks, removeOpenTaskBlocks, insertTaskBlocks, sortCheckboxChanges } from "./task-blocks";
 
 interface DailyNotesConfig {
   folder: string;
@@ -13,10 +15,49 @@ interface DailyNoteCandidate {
 }
 
 const MAX_LOOKBACK_DAYS = 30;
-const PLACEHOLDER_TODO = "- [ ] Number 1";
 
 export default class CarryOverTodosPlugin extends Plugin {
+  private carrying = false;
+  private readingSnapshots = new Map<string, string>();
+  private readingClicks = new Map<string, { before: string; expires: number }>();
+
   async onload() {
+    this.registerEditorExtension(taskSortingExtension(state => {
+      const file = state.field(editorInfoField, false)?.file;
+      return !!file && this.isDailyNote(file);
+    }));
+    // Only arm disk sorting on an actual Reading view checkbox click. Source
+    // editors sort synchronously above, so there are no competing editor writes.
+    this.registerMarkdownPostProcessor((el, ctx) => {
+      const file = this.app.vault.getAbstractFileByPath(ctx.sourcePath);
+      if (!(file instanceof TFile) || !this.isDailyNote(file)) return;
+      void this.app.vault.cachedRead(file).then(content => {
+        if (!this.readingClicks.has(file.path)) this.readingSnapshots.set(file.path, content);
+      }).catch(() => this.readingSnapshots.delete(file.path));
+      const child = new MarkdownRenderChild(el);
+      ctx.addChild(child);
+      child.registerDomEvent(el, 'click', event => {
+        const target = event.target as HTMLElement;
+        if (!target.matches('input.task-list-item-checkbox') || !el.closest('.markdown-reading-view') || el.closest('.markdown-source-view')) return;
+        const before = this.readingSnapshots.get(file.path);
+        if (before !== undefined) this.readingClicks.set(file.path, { before, expires: Date.now() + 3000 });
+      }, { capture: true });
+    });
+    this.registerEvent(this.app.vault.on('modify', file => {
+      if (!(file instanceof TFile) || !this.isDailyNote(file)) return;
+      const pending = this.readingClicks.get(file.path);
+      const before = pending && pending.expires > Date.now() ? pending.before : undefined;
+      this.readingClicks.delete(file.path); // Disarm before our own process emits modify.
+      if (before !== undefined) {
+        void this.app.vault.process(file, current => sortCheckboxChanges(before, current)?.text ?? current)
+          .then(content => this.readingSnapshots.set(file.path, content))
+          .catch(error => { console.error('Carry Over Todos: reading-view sort failed', error); new Notice('Could not sort the task. Your checkbox change was kept.'); });
+      } else if (this.readingSnapshots.has(file.path)) {
+        void this.app.vault.cachedRead(file).then(content => this.readingSnapshots.set(file.path, content))
+          .catch(() => this.readingSnapshots.delete(file.path));
+      }
+    }));
+    this.register(() => { this.readingSnapshots.clear(); this.readingClicks.clear(); });
     this.addCommand({
       id: "carry-over",
       name: "Carry over uncompleted todos",
@@ -54,173 +95,11 @@ export default class CarryOverTodosPlugin extends Plugin {
     return selectCarryOverSources(today.day(), candidates);
   }
 
-  private mergeUniqueTodos(todoLists: string[][]): string[] {
-    const seenTopLevel = new Set<string>();
-    const result: string[] = [];
-
-    for (const todos of todoLists) {
-      let includeCurrentTask = true;
-
-      for (const todo of todos) {
-        if (/^- \[ \]/.test(todo)) {
-          includeCurrentTask = !seenTopLevel.has(todo);
-          seenTopLevel.add(todo);
-        }
-
-        if (includeCurrentTask) result.push(todo);
-      }
-    }
-
-    return result;
-  }
-
-  private extractUncompletedTodos(content: string): string[] {
-    const lines = content.split("\n");
-
-    let todoStart = -1;
-    let todoEnd = lines.length;
-
-    for (let i = 0; i < lines.length; i++) {
-      if (todoStart === -1 && /^#{2,3}\s+TODO\s*$/.test(lines[i])) {
-        todoStart = i + 1;
-      } else if (todoStart !== -1 && /^#{1,3}\s+/.test(lines[i])) {
-        todoEnd = i;
-        break;
-      }
-    }
-
-    if (todoStart === -1) return [];
-
-    const todoLines = lines.slice(todoStart, todoEnd);
-    const result: string[] = [];
-    let skipChildren = false;
-
-    for (const line of todoLines) {
-      const isTopLevel = /^- \[.\]/.test(line);
-      const isNested = /^\t+- \[.\]/.test(line);
-
-      if (isTopLevel) {
-        if (/^- \[ \]/.test(line)) {
-          result.push(line);
-          skipChildren = false;
-        } else {
-          skipChildren = true;
-        }
-      } else if (isNested && !skipChildren) {
-        if (/^\t+- \[ \]/.test(line)) {
-          result.push(line);
-        }
-      } else if (!isTopLevel && !isNested) {
-        skipChildren = false;
-      }
-    }
-
-    return result;
-  }
-
-  private async insertTodosIntoNote(file: TFile, todos: string[]): Promise<boolean> {
-    const content = await this.app.vault.read(file);
-    const lines = content.split("\n");
-
-    let todoHeadingIdx = -1;
-    let sectionEnd = lines.length;
-
-    for (let i = 0; i < lines.length; i++) {
-      if (todoHeadingIdx === -1 && /^#{2,3}\s+TODO\s*$/.test(lines[i])) {
-        todoHeadingIdx = i;
-      } else if (todoHeadingIdx !== -1 && /^#{1,3}\s+/.test(lines[i])) {
-        sectionEnd = i;
-        break;
-      }
-    }
-
-    if (todoHeadingIdx === -1) {
-      new Notice("No TODO section found in today's daily note.");
-      return false;
-    }
-
-    const sectionLines = lines.slice(todoHeadingIdx + 1, sectionEnd);
-    const nonEmptyLines = sectionLines.filter((l) => l.trim().length > 0);
-
-    const hasOnlyPlaceholder =
-      nonEmptyLines.length === 1 && nonEmptyLines[0].trim() === PLACEHOLDER_TODO.trim();
-
-    let newLines: string[];
-
-    if (hasOnlyPlaceholder) {
-      const placeholderIdx = lines.indexOf(PLACEHOLDER_TODO, todoHeadingIdx);
-      newLines = [
-        ...lines.slice(0, placeholderIdx),
-        ...todos,
-        ...lines.slice(placeholderIdx + 1),
-      ];
-    } else {
-      let insertIdx = sectionEnd;
-      for (let i = sectionEnd - 1; i > todoHeadingIdx; i--) {
-        if (lines[i].trim().length > 0) {
-          insertIdx = i + 1;
-          break;
-        }
-      }
-      newLines = [
-        ...lines.slice(0, insertIdx),
-        ...todos,
-        ...lines.slice(insertIdx),
-      ];
-    }
-
-    await this.app.vault.modify(file, newLines.join("\n"));
-    return true;
-  }
-
-  private async removeUncompletedTodos(file: TFile): Promise<void> {
-    const content = await this.app.vault.read(file);
-    const lines = content.split("\n");
-
-    let todoStart = -1;
-    let todoEnd = lines.length;
-
-    for (let i = 0; i < lines.length; i++) {
-      if (todoStart === -1 && /^#{2,3}\s+TODO\s*$/.test(lines[i])) {
-        todoStart = i + 1;
-      } else if (todoStart !== -1 && /^#{1,3}\s+/.test(lines[i])) {
-        todoEnd = i;
-        break;
-      }
-    }
-
-    if (todoStart === -1) return;
-
-    const before = lines.slice(0, todoStart);
-    const after = lines.slice(todoEnd);
-    const todoLines = lines.slice(todoStart, todoEnd);
-
-    const kept: string[] = [];
-    let skipChildren = false;
-
-    for (const line of todoLines) {
-      const isTopLevel = /^- \[.\]/.test(line);
-      const isNested = /^\t+- \[.\]/.test(line);
-
-      if (isTopLevel) {
-        if (/^- \[ \]/.test(line)) {
-          skipChildren = true;
-        } else {
-          skipChildren = false;
-          kept.push(line);
-        }
-      } else if (isNested) {
-        if (!skipChildren) {
-          kept.push(line);
-        }
-      } else {
-        kept.push(line);
-        if (line.trim().length === 0) skipChildren = false;
-      }
-    }
-
-    const newContent = [...before, ...kept, ...after].join("\n");
-    await this.app.vault.modify(file, newContent);
+  private isDailyNote(file: TFile): boolean {
+    const config = this.getDailyNotesConfig();
+    const prefix = config.folder ? config.folder.replace(/\/$/, '') + '/' : '';
+    if (!file.path.startsWith(prefix) || !file.path.endsWith('.md')) return false;
+    return moment(file.path.slice(prefix.length, -3), config.format, true).isValid();
   }
 
   private formatDateNotice(date: moment.Moment): string {
@@ -234,6 +113,19 @@ export default class CarryOverTodosPlugin extends Plugin {
   }
 
   private async carryOverTodos() {
+    if (this.carrying) return;
+    this.carrying = true;
+    try {
+      await this.moveTodos();
+    } catch (error) {
+      console.error('Carry Over Todos: carry-over failed', error);
+      new Notice('Carry-over could not finish. Check the daily notes before retrying.');
+    } finally {
+      this.carrying = false;
+    }
+  }
+
+  private async moveTodos() {
     const config = this.getDailyNotesConfig();
     const todayPath = this.buildNotePath(moment(), config);
     const todayFile = this.app.vault.getAbstractFileByPath(todayPath);
@@ -249,13 +141,18 @@ export default class CarryOverTodosPlugin extends Plugin {
       return;
     }
 
-    const todoLists = await Promise.all(
-      sources.map(async ({ file }) => {
-        const content = await this.app.vault.read(file);
-        return this.extractUncompletedTodos(content);
-      }),
-    );
-    const todos = this.mergeUniqueTodos(todoLists);
+    const todoLists = await Promise.all(sources.map(async ({ file }) => {
+      return openTaskBlocks(await this.app.vault.read(file));
+    }));
+    // Preserve distinct blocks even when their first lines match. This avoids
+    // dropping different notes or subtasks attached to identically named work.
+    const seen = new Set<string>();
+    const todos = todoLists.flat().filter(block => {
+      const key = block.join('\n');
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
     const dateLabel = sources
       .map(({ date }) => this.formatDateNotice(date))
       .join(" and ");
@@ -267,9 +164,19 @@ export default class CarryOverTodosPlugin extends Plugin {
 
     new Notice(`Carrying over ${todos.length} todo(s) from ${dateLabel}.`);
 
-    const inserted = await this.insertTodosIntoNote(todayFile, todos);
-    if (inserted) {
-      await Promise.all(sources.map(({ file }) => this.removeUncompletedTodos(file)));
+    let inserted = false;
+    await this.app.vault.process(todayFile, content => {
+      const next = insertTaskBlocks(content, todos);
+      inserted = next !== undefined;
+      return next ?? content;
+    });
+    if (!inserted) {
+      new Notice("No TODO section found in today's daily note.");
+      return;
+    }
+    // Remove only exact blocks read above; concurrent changes remain in source.
+    for (let i = 0; i < sources.length; i++) {
+      await this.app.vault.process(sources[i].file, content => removeOpenTaskBlocks(content, todoLists[i]));
     }
   }
 }
