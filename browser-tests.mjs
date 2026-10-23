@@ -18,7 +18,11 @@ try {
   await page.addScriptTag({ path: outfile });
   const note = body => `## TODO\n\n${body}\n\n## Meetings\n\n## Notes\nKeep me`;
   const initial = note('- [ ] Alpha\n  - [x] Alpha child\n- [ ] Bravo\n- [ ] Charlie');
-  const snapshot = () => page.evaluate(() => window.snapshot());
+  const snapshot = async () => {
+    // Let the browser finish canceled activation and the queued source update.
+    await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 0)));
+    return page.evaluate(() => window.snapshot());
+  };
   const liveClick = name => page.locator('.cm-line').filter({ hasText: new RegExp(name + '$') }).locator('input').click();
   const doneClick = name => page.locator('.cm-callout label').filter({ hasText: new RegExp(name + '$') }).locator('input').click();
   async function verify() {
@@ -80,6 +84,28 @@ try {
   state = await verify();
   assert.ok(state.text.includes('  - [ ] Second\n  - [ ] First\n    details [[link]]\n  - [x] Third'));
   assert.ok(state.text.includes('- [ ] Parent'));
+  // A microtask can run before the browser rolls back a canceled checkbox
+  // click. With no task movement, the same widget survives and reveals it.
+  await page.evaluate(text => { window.mount(text); window.corruptCheckboxDisplay(); }, note('- [ ] Stale display'));
+  state = await verify();
+  assert.ok(state.text.includes('- [ ] Stale display'), 'display repair never changes task state');
+
+  const stationary = note('- [ ] Parent\n  - [ ] Only child');
+  await page.evaluate(text => window.mount(text), stationary);
+  for (let i = 0; i < 4; i++) {
+    await liveClick('Only child');
+    state = await verify();
+    assert.ok(state.text.includes(i % 2 === 0 ? '- [x] Only child' : '- [ ] Only child'));
+  }
+  const boundary = note('- [ ] Parent\n  - [ ] First\n  - [x] Last');
+  await page.evaluate(text => window.mount(text), boundary);
+  await liveClick('First');
+  await verify();
+  await liveClick('First');
+  await verify();
+  await liveClick('Last');
+  await verify();
+
   const completedChildren = note('- [ ] Active\n\n> [!done]- Completed\n> - [x] Finished\n>   - [ ] First\n>   - [ ] Second');
   await page.evaluate(text => window.mount(text), completedChildren);
   await doneClick('First');

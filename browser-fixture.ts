@@ -139,3 +139,7 @@ function renderReading() {
   const task = parseTasks(readingText.split('\n'))!.tasks[Array.from(readingEl.querySelectorAll('input')).indexOf(input)];
   return { checked: input.checked, correct: task && input.checked === task.checked };
 }) });
+
+(window as any).corruptCheckboxDisplay = () => {
+  view.dom.querySelector<HTMLInputElement>('input.task-list-item-checkbox')!.checked = true;
+};

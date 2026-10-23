@@ -1,7 +1,7 @@
 import { EditorSelection, EditorState, Transaction } from '@codemirror/state';
-import { EditorView, ViewPlugin } from '@codemirror/view';
+import { EditorView, ViewPlugin, ViewUpdate } from '@codemirror/view';
 import { checkboxChangeAtLine, renderedTaskLine } from './checkbox-clicks';
-import { replacement, sortCheckboxChanges } from './task-blocks';
+import { parseTasks, replacement, sortCheckboxChanges } from './task-blocks';
 
 /** A rendered callout's data-line is relative to the callout source block. */
 function checkboxLine(view: EditorView, checkbox: HTMLInputElement): number | undefined {
@@ -37,6 +37,41 @@ export function taskSortingExtension(enabled: (state: EditorState) => boolean) {
   });
   const clicks = ViewPlugin.define(view => {
     let destroyed = false;
+    const win = view.dom.ownerDocument.defaultView!;
+    const pending = new Set<number>();
+    let syncQueued = false;
+    const schedule = (callback: () => void) => {
+      const timer = win.setTimeout(() => {
+        pending.delete(timer);
+        if (!destroyed) callback();
+      }, 0);
+      pending.add(timer);
+    };
+    const sync = () => {
+      if (syncQueued) return;
+      syncQueued = true;
+      schedule(() => {
+        syncQueued = false;
+        if (!enabled(view.state)) return;
+        const lines = view.state.doc.toString().split('\n');
+        const tasks = new Map(parseTasks(lines)?.tasks.map(task => [task.start, task]));
+        // Obsidian can retain widgets across a plugin reload. Repair their
+        // display from Markdown without changing any stored checkbox state.
+        view.dom.querySelectorAll<HTMLInputElement>('input.task-list-item-checkbox').forEach(input => {
+          const line = checkboxLine(view, input);
+          const task = line === undefined ? undefined : tasks.get(line);
+          if (!task) return;
+          input.checked = task.checked;
+          const char = /\[([ xX])\]/.exec(lines[task.start])![1];
+          if (input.hasAttribute('data-task')) input.dataset.task = char;
+          const item = input.parentElement;
+          if (item?.matches('li.task-list-item')) {
+            item.classList.toggle('is-checked', task.checked);
+            item.setAttribute('data-task', char);
+          }
+        });
+      });
+    };
     const click = (event: MouseEvent) => {
       const target = event.target as HTMLElement | null;
       if (!target?.matches('input.task-list-item-checkbox') || view.state.readOnly || !enabled(view.state)) return;
@@ -47,16 +82,24 @@ export function taskSortingExtension(enabled: (state: EditorState) => boolean) {
       if (!change) return;
       event.preventDefault();
       event.stopImmediatePropagation();
-      // A canceled checkbox click restores the browser's old checked value at
-      // the end of dispatch. Wait for that before CodeMirror reuses its DOM for
-      // a different task. Also bypass Obsidian callouts' delayed DOM writes.
-      queueMicrotask(() => {
-        if (destroyed || view.state.doc !== doc || view.state.readOnly || !enabled(view.state)) return;
+      // Microtasks can run before a canceled click's activation rollback.
+      // Use the next event-loop task so that rollback cannot overwrite a
+      // reused widget's new state (including toggles that do not move a task).
+      schedule(() => {
+        if (view.state.doc !== doc || view.state.readOnly || !enabled(view.state)) return;
         view.dispatch({ changes: change, userEvent: 'input.task-checkbox' });
       });
     };
     view.dom.addEventListener('click', click, true);
-    return { destroy() { destroyed = true; view.dom.removeEventListener('click', click, true); } };
+    sync();
+    return { update(update: ViewUpdate) {
+      if (update.docChanged || update.viewportChanged) sync();
+    }, destroy() {
+      destroyed = true;
+      for (const timer of pending) win.clearTimeout(timer);
+      pending.clear();
+      view.dom.removeEventListener('click', click, true);
+    } };
   });
   return [filter, clicks];
 }

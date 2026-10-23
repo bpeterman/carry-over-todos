@@ -11,7 +11,7 @@ Sorting applies only to daily notes matching the folder and date format configur
 - Checking a subtask moves it after its siblings. Unchecking moves it before completed siblings within its own parent. Parent checkboxes stay unchanged.
 - Task blocks retain nested subtasks (including checked ones), continuation text, notes, links, indentation and checkbox states. Tabs, spaces and deeper nesting are supported.
 - Live Preview and Source mode changes use one editor transaction, so undo/redo restores both the checkbox and the move. The cursor follows its original text.
-- Live Preview and Reading view capture native checkbox clicks before Obsidian handles them. Each click resolves its task from the source and applies one toggle plus move. Live Preview waits until the browser finishes the click before moving widgets, keeping reused checkboxes visually consistent. Each click gets its own undo step.
+- Live Preview and Reading view capture native checkbox clicks before Obsidian handles them. Each click resolves its task from the source and applies one toggle plus move. Live Preview applies changes in the next event-loop task, after the browser finishes rolling back a canceled checkbox click. A microtask is too early, even when no task needs to move. Visible checkboxes are also refreshed from Markdown when the plugin loads or the editor updates, repairing stale displays without modifying task states. Each click gets its own undo step.
 - Reading view uses one atomic vault update. If the rendered task list is stale, the click is skipped with a refresh notice rather than changing a task at an outdated line number. This requires native Obsidian task checkboxes; third-party task renderers are not supported. Reading view has no editor undo history.
 
 Sorting runs only for changes consisting entirely of checkbox-state transitions. Ordinary typing, mixed text edits, history undo/redo, remote editor transactions, code examples, other sections and other files are left alone. The plugin does not reorganize existing notes when enabled. Ambiguous duplicate Completed groups are left alone.
@@ -60,7 +60,7 @@ npm run typecheck
 npm run build
 ```
 
-Tests use synthetic notes and a mocked vault, plus real CodeMirror transactions and history. Browser regressions reproduce the old reused-checkbox bug and verify actual click/default-action ordering, callout check/uncheck, nested tasks, Space-key activation, separate undo steps, Reading view and stale-render protection. They never modify vault notes.
+Tests use synthetic notes and a mocked vault, plus real CodeMirror transactions and history. Browser regressions reproduce the old reused-checkbox bug, cover toggles with no movement and stale displays after reload, and verify actual click/default-action ordering, callout check/uncheck, nested tasks, Space-key activation, separate undo steps, Reading view and stale-render protection. They never modify vault notes.
 
 The optional browser suite requires Playwright and a browser:
 
@@ -70,6 +70,14 @@ npx playwright install chromium
 npm run test:browser
 ```
 
-To reuse an existing Chrome installation, set `CARRY_OVER_CHROME` to its executable path. The browser test runner also accepts a path to a preinstalled Playwright module as its first argument. CodeMirror is supplied by Obsidian at runtime and remains external to the plugin bundle.
+To reuse an existing Chrome installation, set `CARRY_OVER_CHROME` to its executable path. The browser test runner also accepts a path to a preinstalled Playwright module as its first argument. Native regressions also run against the actual Obsidian editor, using a disposable vault and a separate application profile. They verify stationary toggles, sibling boundaries, stale display repair after reload, and Completed round trips. CodeMirror is supplied by Obsidian at runtime and remains external to the plugin bundle.
+
+To run the native tests on macOS after building, with Playwright installed:
+
+```bash
+npm run test:native
+```
+
+The runner defaults to `/Applications/Obsidian.app/Contents/MacOS/Obsidian`. Override `CARRY_OVER_OBSIDIAN` for another executable. It creates and removes its own temporary vault/profile, launches a separate Obsidian process, and never opens the user's vault. Like `test:browser`, it accepts a preinstalled Playwright module path as its first argument.
 
 Copy `main.js` and `manifest.json` into `.obsidian/plugins/carry-over-todos/` in the vault, then disable/re-enable **Carry Over Todos** in Community plugins or restart Obsidian. Source files are maintained in this repository. `npm run dev` rebuilds the bundle on edits.
