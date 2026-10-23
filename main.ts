@@ -1,7 +1,8 @@
 import { Plugin, TFile, Notice, moment, editorInfoField, MarkdownRenderChild } from "obsidian";
 import { selectCarryOverSources } from "./source-selection";
 import { taskSortingExtension } from "./editor-sorting";
-import { openTaskBlocks, removeOpenTaskBlocks, insertTaskBlocks, sortCheckboxChanges } from "./task-blocks";
+import { openTaskBlocks, removeOpenTaskBlocks, insertTaskBlocks } from "./task-blocks";
+import { checkboxChangeAtLine, renderedTaskLine, toggleTaskAtLine } from "./checkbox-clicks";
 
 interface DailyNotesConfig {
   folder: string;
@@ -18,46 +19,40 @@ const MAX_LOOKBACK_DAYS = 30;
 
 export default class CarryOverTodosPlugin extends Plugin {
   private carrying = false;
-  private readingSnapshots = new Map<string, string>();
-  private readingClicks = new Map<string, { before: string; expires: number }>();
 
   async onload() {
     this.registerEditorExtension(taskSortingExtension(state => {
       const file = state.field(editorInfoField, false)?.file;
       return !!file && this.isDailyNote(file);
     }));
-    // Only arm disk sorting on an actual Reading view checkbox click. Source
-    // editors sort synchronously above, so there are no competing editor writes.
     this.registerMarkdownPostProcessor((el, ctx) => {
       const file = this.app.vault.getAbstractFileByPath(ctx.sourcePath);
       if (!(file instanceof TFile) || !this.isDailyNote(file)) return;
-      void this.app.vault.cachedRead(file).then(content => {
-        if (!this.readingClicks.has(file.path)) this.readingSnapshots.set(file.path, content);
-      }).catch(() => this.readingSnapshots.delete(file.path));
       const child = new MarkdownRenderChild(el);
       ctx.addChild(child);
       child.registerDomEvent(el, 'click', event => {
-        const target = event.target as HTMLElement;
-        if (!target.matches('input.task-list-item-checkbox') || !el.closest('.markdown-reading-view') || el.closest('.markdown-source-view')) return;
-        const before = this.readingSnapshots.get(file.path);
-        if (before !== undefined) this.readingClicks.set(file.path, { before, expires: Date.now() + 3000 });
+        const target = event.target as HTMLInputElement | null;
+        if (!target?.matches('input.task-list-item-checkbox') || !el.closest('.markdown-reading-view') || el.closest('.markdown-source-view')) return;
+        const section = ctx.getSectionInfo(target);
+        if (!section) return;
+        const line = renderedTaskLine(target.getAttribute('data-line'), section.lineStart);
+        if (line === undefined || !checkboxChangeAtLine(section.text, line)) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        // Own the toggle and the move in one atomic write. A rendered section
+        // may lag behind the file; stale coordinates must never toggle a neighbor.
+        let stale = false;
+        void Promise.resolve().then(() => this.app.vault.process(file, current => {
+          if (current !== section.text) { stale = true; return current; }
+          return toggleTaskAtLine(current, line) ?? current;
+        })).then(() => {
+          if (stale) new Notice('The task list changed. Let it refresh, then click the task again.');
+        }).catch(error => {
+          console.error('Carry Over Todos: checkbox update failed', error);
+          new Notice('Could not update the task. Please try again.');
+        });
       }, { capture: true });
     });
-    this.registerEvent(this.app.vault.on('modify', file => {
-      if (!(file instanceof TFile) || !this.isDailyNote(file)) return;
-      const pending = this.readingClicks.get(file.path);
-      const before = pending && pending.expires > Date.now() ? pending.before : undefined;
-      this.readingClicks.delete(file.path); // Disarm before our own process emits modify.
-      if (before !== undefined) {
-        void this.app.vault.process(file, current => sortCheckboxChanges(before, current)?.text ?? current)
-          .then(content => this.readingSnapshots.set(file.path, content))
-          .catch(error => { console.error('Carry Over Todos: reading-view sort failed', error); new Notice('Could not sort the task. Your checkbox change was kept.'); });
-      } else if (this.readingSnapshots.has(file.path)) {
-        void this.app.vault.cachedRead(file).then(content => this.readingSnapshots.set(file.path, content))
-          .catch(() => this.readingSnapshots.delete(file.path));
-      }
-    }));
-    this.register(() => { this.readingSnapshots.clear(); this.readingClicks.clear(); });
     this.addCommand({
       id: "carry-over",
       name: "Carry over uncompleted todos",

@@ -11,7 +11,8 @@ Sorting applies only to daily notes matching the folder and date format configur
 - Checking a subtask moves it after its siblings. Unchecking moves it before completed siblings within its own parent. Parent checkboxes stay unchanged.
 - Task blocks retain nested subtasks (including checked ones), continuation text, notes, links, indentation and checkbox states. Tabs, spaces and deeper nesting are supported.
 - Live Preview and Source mode changes use one editor transaction, so undo/redo restores both the checkbox and the move. The cursor follows its original text.
-- Reading view uses native checkbox clicks followed by an atomic vault update. This relies on Obsidian rendering native interactive task checkboxes; third-party task renderers are not supported. Reading view has no editor undo history.
+- Live Preview and Reading view capture native checkbox clicks before Obsidian handles them. Each click resolves its task from the source and applies one toggle plus move. Live Preview waits until the browser finishes the click before moving widgets, keeping reused checkboxes visually consistent. Each click gets its own undo step.
+- Reading view uses one atomic vault update. If the rendered task list is stale, the click is skipped with a refresh notice rather than changing a task at an outdated line number. This requires native Obsidian task checkboxes; third-party task renderers are not supported. Reading view has no editor undo history.
 
 Sorting runs only for changes consisting entirely of checkbox-state transitions. Ordinary typing, mixed text edits, history undo/redo, remote editor transactions, code examples, other sections and other files are left alone. The plugin does not reorganize existing notes when enabled. Ambiguous duplicate Completed groups are left alone.
 
@@ -59,6 +60,16 @@ npm run typecheck
 npm run build
 ```
 
-Tests use synthetic notes and a mocked vault, plus real CodeMirror transactions and history. They never modify vault notes. CodeMirror is supplied by Obsidian at runtime and remains external to the plugin bundle.
+Tests use synthetic notes and a mocked vault, plus real CodeMirror transactions and history. Browser regressions reproduce the old reused-checkbox bug and verify actual click/default-action ordering, callout check/uncheck, nested tasks, Space-key activation, separate undo steps, Reading view and stale-render protection. They never modify vault notes.
+
+The optional browser suite requires Playwright and a browser:
+
+```bash
+npm install --no-save playwright
+npx playwright install chromium
+npm run test:browser
+```
+
+To reuse an existing Chrome installation, set `CARRY_OVER_CHROME` to its executable path. The browser test runner also accepts a path to a preinstalled Playwright module as its first argument. CodeMirror is supplied by Obsidian at runtime and remains external to the plugin bundle.
 
 Copy `main.js` and `manifest.json` into `.obsidian/plugins/carry-over-todos/` in the vault, then disable/re-enable **Carry Over Todos** in Community plugins or restart Obsidian. Source files are maintained in this repository. `npm run dev` rebuilds the bundle on edits.
